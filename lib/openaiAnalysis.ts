@@ -8,8 +8,9 @@ import type {
 } from "@/types/meal";
 
 const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
-const DEFAULT_QWEN_MODEL = "qwen3-vl-plus";
+const DEFAULT_QWEN_MODEL = "qwen3.6-plus";
 const FALLBACK_QWEN_VISION_MODEL = "qwen3-vl-plus";
+const LEGACY_QWEN_VISION_MODEL = "qwen-vl-plus";
 const DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
 type LiveAIProvider = Exclude<AnalysisSource, "mock">;
@@ -36,7 +37,7 @@ function selectedProvider(): LiveAIProvider {
 }
 
 function getOpenAIClient() {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
 
   if (!apiKey) {
     return null;
@@ -46,7 +47,9 @@ function getOpenAIClient() {
 }
 
 function getQwenClient() {
-  const apiKey = process.env.DASHSCOPE_API_KEY ?? process.env.QWEN_API_KEY;
+  const apiKey = (
+    process.env.DASHSCOPE_API_KEY ?? process.env.QWEN_API_KEY
+  )?.trim();
 
   if (!apiKey) {
     return null;
@@ -54,7 +57,7 @@ function getQwenClient() {
 
   return new OpenAI({
     apiKey,
-    baseURL: process.env.QWEN_BASE_URL ?? DEFAULT_QWEN_BASE_URL
+    baseURL: (process.env.QWEN_BASE_URL ?? DEFAULT_QWEN_BASE_URL).trim()
   });
 }
 
@@ -176,9 +179,13 @@ async function analyzeMealWithQwen({
     return null;
   }
 
-  const primaryModel = process.env.QWEN_MODEL ?? DEFAULT_QWEN_MODEL;
-  const fallbackModel =
-    process.env.QWEN_VISION_MODEL ?? FALLBACK_QWEN_VISION_MODEL;
+  const models = [
+    process.env.QWEN_MODEL ?? DEFAULT_QWEN_MODEL,
+    process.env.QWEN_VISION_MODEL ?? FALLBACK_QWEN_VISION_MODEL,
+    LEGACY_QWEN_VISION_MODEL
+  ]
+    .map((model) => model.trim())
+    .filter((model, index, allModels) => model && allModels.indexOf(model) === index);
 
   const runQwenAnalysis = async (model: string) => {
     const completion = await client.chat.completions.create({
@@ -205,7 +212,7 @@ async function analyzeMealWithQwen({
           ]
         }
       ],
-      max_tokens: 1400,
+      max_tokens: 1000,
       response_format: {
         type: "json_object"
       }
@@ -220,20 +227,22 @@ async function analyzeMealWithQwen({
     return parseStructuredOutput(output, language);
   };
 
-  try {
-    return await runQwenAnalysis(primaryModel);
-  } catch (error) {
-    if (primaryModel === fallbackModel) {
-      throw error;
+  let latestError: unknown;
+
+  for (const model of models) {
+    try {
+      return await runQwenAnalysis(model);
+    } catch (error) {
+      latestError = error;
+
+      console.warn(
+        `Qwen model ${model} failed for image analysis. Trying next available model.`,
+        error
+      );
     }
-
-    console.warn(
-      `Qwen model ${primaryModel} failed for image analysis. Retrying with ${fallbackModel}.`,
-      error
-    );
-
-    return runQwenAnalysis(fallbackModel);
   }
+
+  throw latestError;
 }
 
 export function getSelectedLiveAIProvider(): LiveAIProvider {

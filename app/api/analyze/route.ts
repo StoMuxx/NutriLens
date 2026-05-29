@@ -98,15 +98,38 @@ function canSendToLiveAI(imageDataUrl: unknown): imageDataUrl is string {
 async function mockResponse(
   preferences: MealPreferences,
   language: Language,
-  warning?: string
+  warning?: string,
+  warningDetail?: string
 ) {
   const analysis = await mockAnalyzeMeal(preferences, language);
 
   return NextResponse.json({
     analysis,
     source: "mock",
-    warning
+    warning,
+    warningDetail
   });
+}
+
+function safeErrorDetail(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return "Unknown provider error.";
+  }
+
+  const data = error as {
+    code?: unknown;
+    message?: unknown;
+    status?: unknown;
+    type?: unknown;
+  };
+  const parts = [
+    typeof data.status === "number" ? `status=${data.status}` : "",
+    typeof data.code === "string" ? `code=${data.code}` : "",
+    typeof data.type === "string" ? `type=${data.type}` : "",
+    typeof data.message === "string" ? data.message : ""
+  ].filter(Boolean);
+
+  return parts.join("; ").slice(0, 300);
 }
 
 export async function POST(request: Request) {
@@ -155,6 +178,11 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error(`${provider} meal analysis failed:`, error);
-    return mockResponse(preferences, language, `${provider}-fallback`);
+    return mockResponse(
+      preferences,
+      language,
+      `${provider}-fallback`,
+      safeErrorDetail(error)
+    );
   }
 }
