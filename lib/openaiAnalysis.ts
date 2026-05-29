@@ -8,7 +8,8 @@ import type {
 } from "@/types/meal";
 
 const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
-const DEFAULT_QWEN_MODEL = "qwen3.6-plus";
+const DEFAULT_QWEN_MODEL = "qwen3-vl-plus";
+const FALLBACK_QWEN_VISION_MODEL = "qwen3-vl-plus";
 const DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
 type LiveAIProvider = Exclude<AnalysisSource, "mock">;
@@ -77,6 +78,16 @@ function buildPrompt(preferences: MealPreferences, language: Language) {
     "For allergies, lactose intolerance, halal, and other restrictions, advise the user to verify ingredients or ask food-service staff instead of guaranteeing safety.",
     "Use riskTagKeys only from this list when relevant: highSugar, highFat, lowVegetables, friedFood, largePortion, possibleAddedSugar, sauceSodium, vegetablesCouldImprove, lowProtein.",
     "Keep advice specific, moderate, practical, and safe for young adults."
+  ].join("\n");
+}
+
+function buildQwenPrompt(preferences: MealPreferences, language: Language) {
+  return [
+    buildPrompt(preferences, language),
+    "",
+    "Return ONLY one valid JSON object. Do not wrap the JSON in markdown.",
+    "The response must be JSON and must match this JSON Schema as closely as possible:",
+    JSON.stringify(mealAnalysisJsonSchema)
   ].join("\n");
 }
 
@@ -165,48 +176,64 @@ async function analyzeMealWithQwen({
     return null;
   }
 
-  const completion = await client.chat.completions.create({
-    model: process.env.QWEN_MODEL ?? DEFAULT_QWEN_MODEL,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are NutriLens, a cautious AI nutrition education assistant. Return only valid JSON matching the provided schema."
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: buildPrompt(preferences, language)
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: imageDataUrl
+  const primaryModel = process.env.QWEN_MODEL ?? DEFAULT_QWEN_MODEL;
+  const fallbackModel =
+    process.env.QWEN_VISION_MODEL ?? FALLBACK_QWEN_VISION_MODEL;
+
+  const runQwenAnalysis = async (model: string) => {
+    const completion = await client.chat.completions.create({
+      model,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are NutriLens, a cautious AI nutrition education assistant. Return only valid JSON."
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: buildQwenPrompt(preferences, language)
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: imageDataUrl
+              }
             }
-          }
-        ]
+          ]
+        }
+      ],
+      max_tokens: 1400,
+      response_format: {
+        type: "json_object"
       }
-    ],
-    max_tokens: 1400,
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "meal_analysis",
-        strict: true,
-        schema: mealAnalysisJsonSchema
-      }
+    });
+
+    const output = completion.choices[0]?.message?.content;
+
+    if (!output) {
+      throw new Error("Qwen returned an empty meal analysis response.");
     }
-  });
 
-  const output = completion.choices[0]?.message?.content;
+    return parseStructuredOutput(output, language);
+  };
 
-  if (!output) {
-    throw new Error("Qwen returned an empty meal analysis response.");
+  try {
+    return await runQwenAnalysis(primaryModel);
+  } catch (error) {
+    if (primaryModel === fallbackModel) {
+      throw error;
+    }
+
+    console.warn(
+      `Qwen model ${primaryModel} failed for image analysis. Retrying with ${fallbackModel}.`,
+      error
+    );
+
+    return runQwenAnalysis(fallbackModel);
   }
-
-  return parseStructuredOutput(output, language);
 }
 
 export function getSelectedLiveAIProvider(): LiveAIProvider {
