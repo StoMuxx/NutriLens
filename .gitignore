@@ -9,3 +9,4 @@ dist/
 .codex-tools/
 dev-server*.log
 *.tsbuildinfo
+outputs/
